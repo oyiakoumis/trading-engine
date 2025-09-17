@@ -85,7 +85,7 @@ namespace TradingEngine.Infrastructure.Pipeline
 
             _tickHistory = new ConcurrentDictionary<Symbol, List<Tick>>();
             _positions = new ConcurrentDictionary<Symbol, Position>();
-            _startupSemaphore = new SemaphoreSlim(0, 1);
+            _startupSemaphore = new SemaphoreSlim(0, 5);  // Allow 5 threads to wait
             _shutdownCts = new CancellationTokenSource();
 
             // Initialize components
@@ -123,7 +123,12 @@ namespace TradingEngine.Infrastructure.Pipeline
             _exchange.Start();
 
             _isRunning = true;
-            _startupSemaphore.Release();
+            
+            // Release semaphore for all waiting threads (5 processing threads)
+            for (int i = 0; i < 5; i++)
+            {
+                _startupSemaphore.Release();
+            }
 
             await _eventBus.PublishAsync(new SystemEvent("INFO", "Trading pipeline started", "Pipeline"));
 
@@ -224,6 +229,12 @@ namespace TradingEngine.Infrastructure.Pipeline
             await _startupSemaphore.WaitAsync(cancellationToken);
 
             _logger?.LogInformation("Strategy processing thread started");
+            
+            // Subscribe to strategy engine signal events
+            _strategyEngine.SignalGenerated += (sender, signal) =>
+            {
+                // Signal events are handled through the pipeline
+            };
 
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -231,7 +242,7 @@ namespace TradingEngine.Infrastructure.Pipeline
                 {
                     // Get pending signals from strategy engine
                     var signals = _strategyEngine.GetPendingSignals();
-
+                    
                     foreach (var signal in signals)
                     {
                         // Submit signal to order router

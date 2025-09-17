@@ -96,9 +96,8 @@ namespace TradingEngine.Console
             services.AddLogging(builder =>
             {
                 builder.SetMinimumLevel(LogLevel.Information);
-                builder.AddConsole(options =>
+                builder.AddSimpleConsole(options =>
                 {
-                    options.FormatterName = "simple";
                     options.TimestampFormat = "HH:mm:ss ";
                 });
             });
@@ -203,7 +202,6 @@ namespace TradingEngine.Console
                     ? ConsoleColor.Green
                     : ConsoleColor.Red;
 
-                WriteColoredLine($"[SIGNAL] {e.Symbol} {e.Side} {e.Quantity} - {e.Reason} (Confidence: {e.Confidence:P})", color);
                 await Task.CompletedTask;
             });
 
@@ -329,8 +327,6 @@ namespace TradingEngine.Console
                 PipelineEventType.Warning => ConsoleColor.Yellow,
                 _ => ConsoleColor.White
             };
-
-            WriteColoredLine($"[PIPELINE] {e.Message}", color);
         }
 
         private static void WriteColoredLine(string message, ConsoleColor color)

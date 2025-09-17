@@ -25,7 +25,13 @@ This trading engine implements a complete tick-to-trade pipeline with the follow
 - **SOLID Principles**: Clean architecture with dependency injection
 - **Design Patterns**: Strategy, Observer, CQRS, Repository patterns
 
-## 📊 System Features
+## 🚀 Quick Start
+
+```bash
+dotnet build src/TradingEngine.Console/TradingEngine.Console.csproj && dotnet run --project src/TradingEngine.Console
+```
+
+## System Features
 
 ### Market Data Processing
 - Simulated tick generation for multiple symbols
