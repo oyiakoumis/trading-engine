@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>12.0</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TradingEngine.Domain\TradingEngine.Domain.csproj" />
+    <ProjectReference Include="..\TradingEngine.MarketData\TradingEngine.MarketData.csproj" />
+    <ProjectReference Include="..\TradingEngine.Strategies\TradingEngine.Strategies.csproj" />
+  </ItemGroup>
+
+</Project>
