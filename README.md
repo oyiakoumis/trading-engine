@@ -1,4 +1,4 @@
-# High-Performance Trading Engine
+# Trading Engine (DEMO)(WIP)
 
 A C# tick-to-trade pipeline implementing real-time market data handling, pluggable strategy execution, order lifecycle management, and risk control. Built with concurrent processing, lock-free data structures, and domain-driven design for low-latency trading simulation.
 
