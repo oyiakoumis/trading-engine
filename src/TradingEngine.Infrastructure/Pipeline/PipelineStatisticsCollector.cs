@@ -1,5 +1,3 @@
-using System.Collections.Concurrent;
-using TradingEngine.Domain.ValueObjects;
 using TradingEngine.Infrastructure.EventBus;
 
 namespace TradingEngine.Infrastructure.Pipeline

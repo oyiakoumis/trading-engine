@@ -61,10 +61,16 @@ namespace TradingEngine.Console.Extensions
         private static IServiceCollection AddMarketDataServices(this IServiceCollection services)
         {
             services.AddSingleton<IMarketDataProvider, SimulatedMarketDataProvider>();
-            
-            // Add MarketDataProcessor
-            services.AddSingleton<MarketDataProcessor>();
-            
+
+            // Add MarketDataProcessor with proper interface registration
+            services.AddSingleton<MarketDataProcessor>(sp =>
+            {
+                var logger = sp.GetService<ILogger<MarketDataProcessor>>();
+                return new MarketDataProcessor(logger);
+            });
+
+            services.AddSingleton<IMarketDataProcessor>(sp => sp.GetRequiredService<MarketDataProcessor>());
+
             return services;
         }
 
@@ -102,7 +108,7 @@ namespace TradingEngine.Console.Extensions
         {
             services.AddSingleton<IOrderManager, OrderManager>();
             services.AddSingleton<OrderManager>(sp => (OrderManager)sp.GetRequiredService<IOrderManager>());
-            
+
             // Add OrderRouter
             services.AddSingleton<OrderRouter>(sp =>
             {
@@ -110,7 +116,7 @@ namespace TradingEngine.Console.Extensions
                 var exchange = sp.GetRequiredService<MockExchange>();
                 return new OrderRouter(orderManager, exchange);
             });
-            
+
             return services;
         }
 

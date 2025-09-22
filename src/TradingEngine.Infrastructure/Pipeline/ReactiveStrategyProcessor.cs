@@ -31,19 +31,19 @@ namespace TradingEngine.Infrastructure.Pipeline
             _eventBus = eventBus;
             _statisticsCollector = statisticsCollector;
             _logger = logger;
-            
+
             var channelOptions = new UnboundedChannelOptions
             {
                 SingleReader = true,
                 SingleWriter = false
             };
-            
+
             _signalChannel = Channel.CreateUnbounded<Signal>(channelOptions);
             _processingCts = new CancellationTokenSource();
-            
+
             // Subscribe to strategy engine signals
             _strategyEngine.SignalGenerated += OnSignalGenerated;
-            
+
             // Start processing task
             _processingTask = ProcessSignalsAsync(_processingCts.Token);
         }
@@ -122,7 +122,7 @@ namespace TradingEngine.Infrastructure.Pipeline
 
             _disposed = true;
             _strategyEngine.SignalGenerated -= OnSignalGenerated;
-            
+
             _processingCts.Cancel();
             try
             {

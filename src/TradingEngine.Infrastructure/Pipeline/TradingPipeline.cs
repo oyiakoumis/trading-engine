@@ -1,8 +1,6 @@
 using System.Collections.Concurrent;
-using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using TradingEngine.Domain.Entities;
-using TradingEngine.Domain.Enums;
 using TradingEngine.Domain.Events;
 using TradingEngine.Domain.ValueObjects;
 using TradingEngine.Execution.Interfaces;
@@ -17,12 +15,12 @@ using TradingEngine.Strategies.Engine;
 namespace TradingEngine.Infrastructure.Pipeline
 {
     /// <summary>
-    /// Refactored trading pipeline that orchestrates all components
-    /// Uses dependency injection and reactive patterns for better performance and maintainability
+    /// Trading pipeline that orchestrates all components
+    /// Uses dependency injection and reactive patterns
     /// </summary>
     public class TradingPipeline : IPipelineOrchestrator, IAsyncDisposable
     {
-        // Core components - now injected dependencies
+        // Core components
         private readonly IMarketDataProvider _marketDataProvider;
         private readonly MarketDataProcessor _marketDataProcessor;
         private readonly StrategyEngine _strategyEngine;
@@ -34,20 +32,18 @@ namespace TradingEngine.Infrastructure.Pipeline
         private readonly IEventBus _eventBus;
         private readonly ILogger<TradingPipeline>? _logger;
 
-        // Helper classes for better separation of concerns
+        // Helper classes
         private readonly PipelineStatisticsCollector _statisticsCollector;
         private readonly ReactiveStrategyProcessor _strategyProcessor;
         private readonly ComponentCoordinator _componentCoordinator;
 
-        // Thread management with proper cancellation
+        // Thread management
         private readonly CancellationTokenSource _shutdownCts;
         private readonly Task _marketDataTask;
         private readonly SemaphoreSlim _startupSemaphore;
 
         // Thread-safe state management
-        private readonly ConcurrentDictionary<Symbol, ConcurrentQueue<Tick>> _tickHistory;
         private readonly ConcurrentDictionary<Symbol, Position> _positions;
-        private readonly SemaphoreSlim _tickHistorySemaphore;
         private volatile bool _isRunning;
         private volatile bool _disposed;
 
@@ -82,11 +78,9 @@ namespace TradingEngine.Infrastructure.Pipeline
             _eventBus = eventBus ?? throw new ArgumentNullException(nameof(eventBus));
             _logger = logger;
 
-            // Initialize collections with thread-safe alternatives
-            _tickHistory = new ConcurrentDictionary<Symbol, ConcurrentQueue<Tick>>();
+            // Initialize collections
             _positions = new ConcurrentDictionary<Symbol, Position>();
             _startupSemaphore = new SemaphoreSlim(0, PipelineConstants.ProcessingThreadCount);
-            _tickHistorySemaphore = new SemaphoreSlim(1, 1);
             _shutdownCts = new CancellationTokenSource();
 
             // Initialize helper classes
@@ -94,7 +88,7 @@ namespace TradingEngine.Infrastructure.Pipeline
             _strategyProcessor = new ReactiveStrategyProcessor(_strategyEngine, _eventBus, _statisticsCollector, null);
             _componentCoordinator = new ComponentCoordinator(_exchange, _riskManager, _pnlTracker, _eventBus, _statisticsCollector, null);
 
-            // Initialize event handlers with proper async patterns
+            // Initialize event handlers
             InitializeEventHandlers();
 
             // Start processing task for market data
@@ -119,7 +113,7 @@ namespace TradingEngine.Infrastructure.Pipeline
                 // Start statistics collection
                 _statisticsCollector.Start();
 
-                // Start all components in proper order
+                // Start all components in order
                 await _marketDataProvider.ConnectAsync();
                 await _marketDataProvider.SubscribeAsync(symbols);
 
@@ -221,11 +215,8 @@ namespace TradingEngine.Infrastructure.Pipeline
                         // Process tick through the processor
                         await _marketDataProcessor.SubmitTickAsync(tick, cancellationToken);
 
-                        // Update tick history with thread-safe operations
-                        await UpdateTickHistoryAsync(tick);
-
-                        // Update strategy engine
-                        var tickHistory = await GetTickHistoryAsync(tick.Symbol);
+                        // Update strategy engine with tick history from processor
+                        var tickHistory = _marketDataProcessor.GetTickHistory(tick.Symbol).ToList();
                         await _strategyEngine.UpdateMarketDataAsync(tick, tickHistory);
 
                         // Update exchange prices
@@ -260,59 +251,15 @@ namespace TradingEngine.Infrastructure.Pipeline
             }
         }
 
-        /// <summary>
-        /// Thread-safe tick history update using SemaphoreSlim
-        /// </summary>
-        private async Task UpdateTickHistoryAsync(Tick tick)
-        {
-            await _tickHistorySemaphore.WaitAsync();
-            try
-            {
-                var history = _tickHistory.GetOrAdd(tick.Symbol, _ => new ConcurrentQueue<Tick>());
-                history.Enqueue(tick);
-
-                // Trim old ticks if needed
-                while (history.Count > TickHistorySize && history.TryDequeue(out _))
-                {
-                    // Remove oldest tick
-                }
-            }
-            finally
-            {
-                _tickHistorySemaphore.Release();
-            }
-        }
 
         /// <summary>
-        /// Get tick history in a thread-safe manner
-        /// </summary>
-        private async Task<List<Tick>> GetTickHistoryAsync(Symbol symbol)
-        {
-            await _tickHistorySemaphore.WaitAsync();
-            try
-            {
-                if (_tickHistory.TryGetValue(symbol, out var history))
-                {
-                    return history.ToArray().ToList();
-                }
-                return new List<Tick>();
-            }
-            finally
-            {
-                _tickHistorySemaphore.Release();
-            }
-        }
-
-        /// <summary>
-        /// Initialize event handlers with proper patterns (no async lambdas)
+        /// Initialize event handlers
         /// </summary>
         private void InitializeEventHandlers()
         {
-            // Subscribe to risk breaches with sync handler
+            // Subscribe to risk breaches
             _riskManager.RiskBreached += OnRiskBreached;
 
-            // Strategy engine event subscription is now handled by ReactiveStrategyProcessor
-            // No empty event handlers anymore!
         }
 
         /// <summary>
@@ -364,7 +311,7 @@ namespace TradingEngine.Infrastructure.Pipeline
         }
 
         /// <summary>
-        /// Proper async dispose pattern
+        /// Async dispose pattern implementation
         /// </summary>
         public async ValueTask DisposeAsync()
         {
@@ -388,18 +335,17 @@ namespace TradingEngine.Infrastructure.Pipeline
 
                 _shutdownCts.Dispose();
                 _startupSemaphore.Dispose();
-                _tickHistorySemaphore.Dispose();
 
                 // Dispose injected components if they implement IDisposable
                 if (_marketDataProcessor is IDisposable disposableProcessor)
                     disposableProcessor.Dispose();
-                
+
                 if (_strategyEngine is IDisposable disposableStrategy)
                     disposableStrategy.Dispose();
-                
+
                 if (_orderRouter is IDisposable disposableRouter)
                     disposableRouter.Dispose();
-                
+
                 _exchange?.Dispose();
                 _pnlTracker?.Dispose();
 

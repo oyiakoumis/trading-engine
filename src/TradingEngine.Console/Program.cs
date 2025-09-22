@@ -114,7 +114,6 @@ namespace TradingEngine.Console
             // Subscribe to tick events (synchronous handlers)
             eventBus.Subscribe<TickReceivedEvent>(async e =>
             {
-                // Log high-level tick info (commented out to reduce noise)
                 // System.Console.WriteLine($"[TICK] {e.Tick.Symbol}: Bid={e.Tick.Bid} Ask={e.Tick.Ask}");
                 await Task.CompletedTask;
             });

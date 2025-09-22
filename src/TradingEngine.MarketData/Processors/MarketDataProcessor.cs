@@ -1,6 +1,10 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
 using TradingEngine.Domain.ValueObjects;
+using TradingEngine.MarketData.DataStructures;
+using TradingEngine.MarketData.Interfaces;
+using TradingEngine.MarketData.Models;
 
 namespace TradingEngine.MarketData.Processors
 {
@@ -8,20 +12,26 @@ namespace TradingEngine.MarketData.Processors
     /// Processes and validates market data ticks
     /// Maintains tick history and provides data quality checks
     /// </summary>
-    public class MarketDataProcessor : IDisposable
+    public class MarketDataProcessor : IMarketDataProcessor
     {
         private readonly Channel<Tick> _inputChannel;
-        private readonly Channel<Tick> _outputChannel;
         private readonly ConcurrentDictionary<Symbol, CircularBuffer<Tick>> _tickHistory;
         private readonly ConcurrentDictionary<Symbol, TickStatistics> _statistics;
         private readonly int _historySize;
         private readonly int _staleThresholdMs;
+        private readonly ILogger<MarketDataProcessor>? _logger;
+        private readonly object _startLock = new();
+
         private CancellationTokenSource? _processingCts;
         private Task? _processingTask;
         private bool _disposed;
 
-        public MarketDataProcessor(int historySize = 1000, int staleThresholdMs = 5000)
+        public MarketDataProcessor(
+            ILogger<MarketDataProcessor>? logger = null,
+            int historySize = 1000,
+            int staleThresholdMs = 5000)
         {
+            _logger = logger;
             _historySize = historySize;
             _staleThresholdMs = staleThresholdMs;
             _tickHistory = new ConcurrentDictionary<Symbol, CircularBuffer<Tick>>();
@@ -30,11 +40,10 @@ namespace TradingEngine.MarketData.Processors
             var channelOptions = new UnboundedChannelOptions
             {
                 SingleReader = true,
-                SingleWriter = true
+                SingleWriter = false
             };
 
             _inputChannel = Channel.CreateUnbounded<Tick>(channelOptions);
-            _outputChannel = Channel.CreateUnbounded<Tick>(channelOptions);
         }
 
         /// <summary>
@@ -42,10 +51,18 @@ namespace TradingEngine.MarketData.Processors
         /// </summary>
         public void Start()
         {
-            if (_processingTask != null) return;
+            lock (_startLock)
+            {
+                if (_processingTask != null)
+                {
+                    _logger?.LogWarning("Market data processor is already running");
+                    return;
+                }
 
-            _processingCts = new CancellationTokenSource();
-            _processingTask = ProcessTicksAsync(_processingCts.Token);
+                _processingCts = new CancellationTokenSource();
+                _processingTask = ProcessTicksAsync(_processingCts.Token);
+                _logger?.LogInformation("Market data processor started");
+            }
         }
 
         /// <summary>
@@ -53,11 +70,22 @@ namespace TradingEngine.MarketData.Processors
         /// </summary>
         public async Task StopAsync()
         {
+            _logger?.LogInformation("Stopping market data processor");
+
             _processingCts?.Cancel();
             if (_processingTask != null)
             {
-                await _processingTask.ConfigureAwait(false);
+                try
+                {
+                    await _processingTask.WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                catch (TimeoutException)
+                {
+                    _logger?.LogWarning("Market data processor did not stop within timeout");
+                }
             }
+
+            _logger?.LogInformation("Market data processor stopped");
         }
 
         /// <summary>
@@ -65,7 +93,11 @@ namespace TradingEngine.MarketData.Processors
         /// </summary>
         public async ValueTask<bool> SubmitTickAsync(Tick tick, CancellationToken cancellationToken = default)
         {
-            if (_disposed) return false;
+            if (_disposed)
+            {
+                _logger?.LogWarning("Cannot submit tick - processor is disposed");
+                return false;
+            }
 
             try
             {
@@ -74,24 +106,13 @@ namespace TradingEngine.MarketData.Processors
             }
             catch (OperationCanceledException)
             {
+                _logger?.LogDebug("Tick submission cancelled for symbol {Symbol}", tick.Symbol);
                 return false;
             }
-        }
-
-        /// <summary>
-        /// Get processed ticks
-        /// </summary>
-        public async IAsyncEnumerable<Tick> GetProcessedTicksAsync(CancellationToken cancellationToken = default)
-        {
-            while (!cancellationToken.IsCancellationRequested)
+            catch (Exception ex)
             {
-                if (await _outputChannel.Reader.WaitToReadAsync(cancellationToken))
-                {
-                    while (_outputChannel.Reader.TryRead(out var tick))
-                    {
-                        yield return tick;
-                    }
-                }
+                _logger?.LogError(ex, "Error submitting tick for symbol {Symbol}", tick.Symbol);
+                return false;
             }
         }
 
@@ -117,6 +138,8 @@ namespace TradingEngine.MarketData.Processors
 
         private async Task ProcessTicksAsync(CancellationToken cancellationToken)
         {
+            _logger?.LogDebug("Market data processing task started");
+
             while (!cancellationToken.IsCancellationRequested)
             {
                 try
@@ -134,8 +157,7 @@ namespace TradingEngine.MarketData.Processors
                                 // Update statistics
                                 UpdateStatistics(tick);
 
-                                // Forward to output channel
-                                await _outputChannel.Writer.WriteAsync(tick, cancellationToken);
+                                _logger?.LogTrace("Processed valid tick for symbol {Symbol}", tick.Symbol);
                             }
                         }
                     }
@@ -146,10 +168,11 @@ namespace TradingEngine.MarketData.Processors
                 }
                 catch (Exception ex)
                 {
-                    // Log error in production
-                    Console.WriteLine($"Error processing tick: {ex.Message}");
+                    _logger?.LogError(ex, "Error processing tick batch");
                 }
             }
+
+            _logger?.LogDebug("Market data processing task stopped");
         }
 
         private bool ValidateTick(Tick tick)
@@ -157,21 +180,16 @@ namespace TradingEngine.MarketData.Processors
             // Check if tick is valid
             if (!tick.IsValid)
             {
-                Console.WriteLine($"Invalid tick rejected: {tick.Symbol}");
+                _logger?.LogWarning("Invalid tick rejected: {Symbol} - Bid: {Bid}, Ask: {Ask}, BidSize: {BidSize}, AskSize: {AskSize}",
+                    tick.Symbol, tick.Bid, tick.Ask, tick.BidSize, tick.AskSize);
                 return false;
             }
 
             // Check if tick is stale
             if (tick.IsStale(_staleThresholdMs))
             {
-                Console.WriteLine($"Stale tick rejected: {tick.Symbol} (Age: {tick.Age.TotalMilliseconds}ms)");
-                return false;
-            }
-
-            // Check for negative spread
-            if (tick.Spread.Value < 0)
-            {
-                Console.WriteLine($"Negative spread tick rejected: {tick.Symbol}");
+                _logger?.LogWarning("Stale tick rejected: {Symbol} (Age: {Age}ms)",
+                    tick.Symbol, tick.Age.TotalMilliseconds);
                 return false;
             }
 
@@ -185,147 +203,61 @@ namespace TradingEngine.MarketData.Processors
                 (_, existing) => existing.Update(tick));
         }
 
-        public void Dispose()
+        /// <summary>
+        /// Async disposal pattern implementation
+        /// </summary>
+        public async ValueTask DisposeAsync()
         {
             if (_disposed) return;
 
             _disposed = true;
-            _processingCts?.Cancel();
-            _processingTask?.Wait(TimeSpan.FromSeconds(5));
-            _processingCts?.Dispose();
-            _inputChannel.Writer.TryComplete();
-            _outputChannel.Writer.TryComplete();
-        }
-    }
+            _logger?.LogInformation("Disposing market data processor");
 
-    /// <summary>
-    /// Circular buffer for efficient tick history storage
-    /// </summary>
-    public class CircularBuffer<T>
-    {
-        private readonly T[] _buffer;
-        private readonly object _lock = new();
-        private int _head;
-        private int _tail;
-        private int _count;
-
-        public CircularBuffer(int capacity)
-        {
-            _buffer = new T[capacity];
-        }
-
-        public void Add(T item)
-        {
-            lock (_lock)
+            try
             {
-                _buffer[_tail] = item;
-                _tail = (_tail + 1) % _buffer.Length;
+                // Stop processing
+                _processingCts?.Cancel();
+                _inputChannel.Writer.TryComplete();
 
-                if (_count < _buffer.Length)
+                // Wait for processing task to complete
+                if (_processingTask != null)
                 {
-                    _count++;
+                    try
+                    {
+                        await _processingTask.WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    catch (TimeoutException)
+                    {
+                        _logger?.LogWarning("Processing task did not complete within timeout during disposal");
+                    }
                 }
-                else
+
+                // Dispose resources
+                _processingCts?.Dispose();
+
+                // Dispose tick history buffers
+                foreach (var buffer in _tickHistory.Values)
                 {
-                    _head = (_head + 1) % _buffer.Length;
+                    buffer.Dispose();
                 }
+                _tickHistory.Clear();
+                _statistics.Clear();
+
+                _logger?.LogInformation("Market data processor disposed successfully");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Error during market data processor disposal");
+                throw;
             }
         }
 
-        public T[] ToArray()
+        /// <summary>
+        /// Synchronous dispose for IDisposable compatibility
+        /// </summary>
+        public void Dispose()
         {
-            lock (_lock)
-            {
-                var result = new T[_count];
-                if (_count == 0) return result;
-
-                if (_head < _tail)
-                {
-                    Array.Copy(_buffer, _head, result, 0, _count);
-                }
-                else
-                {
-                    var firstPart = _buffer.Length - _head;
-                    Array.Copy(_buffer, _head, result, 0, firstPart);
-                    Array.Copy(_buffer, 0, result, firstPart, _tail);
-                }
-
-                return result;
-            }
-        }
-
-        public int Count => _count;
-    }
-
-    /// <summary>
-    /// Statistics for market data
-    /// </summary>
-    public class TickStatistics
-    {
-        private readonly object _lock = new();
-        private decimal _totalVolume;
-        private decimal _totalNotional;
-        private int _tickCount;
-        private Price _highPrice;
-        private Price _lowPrice;
-        private Price _openPrice;
-        private Price _lastPrice;
-        private Timestamp _firstTickTime;
-        private Timestamp _lastTickTime;
-
-        public decimal AverageSpread { get; private set; }
-        public decimal AverageVolume => _tickCount > 0 ? _totalVolume / _tickCount : 0;
-        public decimal VWAP => _totalVolume > 0 ? _totalNotional / _totalVolume : 0;
-        public int TicksPerSecond { get; private set; }
-        public Price High => _highPrice;
-        public Price Low => _lowPrice;
-        public Price Open => _openPrice;
-        public Price Last => _lastPrice;
-        public int TickCount => _tickCount;
-
-        public TickStatistics(Tick firstTick)
-        {
-            _highPrice = firstTick.MidPrice;
-            _lowPrice = firstTick.MidPrice;
-            _openPrice = firstTick.MidPrice;
-            _lastPrice = firstTick.MidPrice;
-            _firstTickTime = firstTick.Timestamp;
-            _lastTickTime = firstTick.Timestamp;
-            Update(firstTick);
-        }
-
-        public TickStatistics Update(Tick tick)
-        {
-            lock (_lock)
-            {
-                _tickCount++;
-                _lastPrice = tick.MidPrice;
-
-                if (tick.MidPrice > _highPrice)
-                    _highPrice = tick.MidPrice;
-
-                if (tick.MidPrice < _lowPrice)
-                    _lowPrice = tick.MidPrice;
-
-                // Update volume and notional
-                var avgSize = (tick.BidSize.Value + tick.AskSize.Value) / 2;
-                _totalVolume += avgSize;
-                _totalNotional += avgSize * tick.MidPrice.Value;
-
-                // Update spread average
-                AverageSpread = ((AverageSpread * (_tickCount - 1)) + tick.Spread.Value) / _tickCount;
-
-                // Calculate ticks per second
-                var elapsed = (tick.Timestamp.Value - _firstTickTime.Value).TotalSeconds;
-                if (elapsed > 0)
-                {
-                    TicksPerSecond = (int)(_tickCount / elapsed);
-                }
-
-                _lastTickTime = tick.Timestamp;
-
-                return this;
-            }
+            DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 }

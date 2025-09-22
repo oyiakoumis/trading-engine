@@ -6,7 +6,6 @@ using TradingEngine.Domain.ValueObjects;
 using TradingEngine.Execution.Exchange;
 using TradingEngine.Execution.Interfaces;
 using TradingEngine.Infrastructure.EventBus;
-using TradingEngine.MarketData.Processors;
 using TradingEngine.Risk.Interfaces;
 using TradingEngine.Risk.Services;
 
@@ -28,7 +27,7 @@ namespace TradingEngine.Infrastructure.Pipeline
         private readonly Channel<ExecutionReport> _executionReports;
         private readonly Channel<(Symbol Symbol, Position Position)> _positionUpdates;
         private readonly Channel<(Symbol Symbol, decimal PnL)> _pnlUpdates;
-        
+
         private readonly CancellationTokenSource _processingCts;
         private readonly Task[] _processingTasks;
         private bool _disposed;
