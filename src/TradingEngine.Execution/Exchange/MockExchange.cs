@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using TradingEngine.Domain.Entities;
 using TradingEngine.Domain.Enums;
 using TradingEngine.Domain.ValueObjects;
+using TradingEngine.Execution.Interfaces;
 using TradingEngine.Execution.Services;
 
 namespace TradingEngine.Execution.Exchange
@@ -10,7 +11,7 @@ namespace TradingEngine.Execution.Exchange
     /// Simulated exchange for order matching and execution
     /// Provides realistic fill simulation with latency and slippage
     /// </summary>
-    public class MockExchange : IDisposable
+    public class MockExchange : IExchange
     {
         private readonly ConcurrentDictionary<Symbol, OrderBook> _orderBooks;
         private readonly ConcurrentDictionary<OrderId, Order> _pendingOrders;

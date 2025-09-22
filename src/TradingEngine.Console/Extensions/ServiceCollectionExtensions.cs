@@ -8,6 +8,7 @@ using TradingEngine.Execution.Services;
 using TradingEngine.Infrastructure.EventBus;
 using TradingEngine.Infrastructure.Pipeline;
 using TradingEngine.MarketData.Interfaces;
+using TradingEngine.MarketData.Processors;
 using TradingEngine.MarketData.Providers;
 using TradingEngine.Risk.Interfaces;
 using TradingEngine.Risk.Services;
@@ -60,6 +61,10 @@ namespace TradingEngine.Console.Extensions
         private static IServiceCollection AddMarketDataServices(this IServiceCollection services)
         {
             services.AddSingleton<IMarketDataProvider, SimulatedMarketDataProvider>();
+            
+            // Add MarketDataProcessor
+            services.AddSingleton<MarketDataProcessor>();
+            
             return services;
         }
 
@@ -97,6 +102,15 @@ namespace TradingEngine.Console.Extensions
         {
             services.AddSingleton<IOrderManager, OrderManager>();
             services.AddSingleton<OrderManager>(sp => (OrderManager)sp.GetRequiredService<IOrderManager>());
+            
+            // Add OrderRouter
+            services.AddSingleton<OrderRouter>(sp =>
+            {
+                var orderManager = sp.GetRequiredService<IOrderManager>();
+                var exchange = sp.GetRequiredService<MockExchange>();
+                return new OrderRouter(orderManager, exchange);
+            });
+            
             return services;
         }
 
@@ -130,14 +144,19 @@ namespace TradingEngine.Console.Extensions
                 };
             });
 
+            // Register IExchange interface
+            services.AddSingleton<IExchange>(sp => sp.GetRequiredService<MockExchange>());
+
             services.AddSingleton<TradingPipeline>(sp =>
             {
                 var logger = sp.GetService<ILogger<TradingPipeline>>();
                 return new TradingPipeline(
                     sp.GetRequiredService<IMarketDataProvider>(),
+                    sp.GetRequiredService<MarketDataProcessor>(),
                     sp.GetRequiredService<StrategyEngine>(),
                     sp.GetRequiredService<IOrderManager>(),
-                    sp.GetRequiredService<MockExchange>(),
+                    sp.GetRequiredService<OrderRouter>(),
+                    sp.GetRequiredService<IExchange>(),
                     sp.GetRequiredService<IRiskManager>(),
                     sp.GetRequiredService<PnLTracker>(),
                     sp.GetRequiredService<IEventBus>(),
