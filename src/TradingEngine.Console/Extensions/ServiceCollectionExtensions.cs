@@ -1,0 +1,155 @@
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using TradingEngine.Console.Configuration;
+using TradingEngine.Execution.Exchange;
+using TradingEngine.Execution.Interfaces;
+using TradingEngine.Execution.Services;
+using TradingEngine.Infrastructure.EventBus;
+using TradingEngine.Infrastructure.Pipeline;
+using TradingEngine.MarketData.Interfaces;
+using TradingEngine.MarketData.Providers;
+using TradingEngine.Risk.Interfaces;
+using TradingEngine.Risk.Services;
+using TradingEngine.Strategies.Engine;
+using TradingEngine.Strategies.Implementations;
+using TradingEngine.Strategies.Interfaces;
+using TradingEngine.Strategies.Models;
+
+namespace TradingEngine.Console.Extensions
+{
+    internal static class ServiceCollectionExtensions
+    {
+        public static IServiceCollection AddTradingServices(this IServiceCollection services, IConfiguration configuration)
+        {
+            // Configure options
+            services.Configure<TradingConfiguration>(configuration.GetSection("Trading"));
+
+            // Add domain services
+            services.AddLoggingServices(configuration);
+            services.AddEventBusServices();
+            services.AddMarketDataServices();
+            services.AddStrategyServices(configuration);
+            services.AddExecutionServices();
+            services.AddRiskServices(configuration);
+            services.AddTradingPipeline(configuration);
+
+            return services;
+        }
+
+        private static IServiceCollection AddLoggingServices(this IServiceCollection services, IConfiguration configuration)
+        {
+            services.AddLogging(builder =>
+            {
+                builder.AddConfiguration(configuration.GetSection("Logging"));
+                builder.AddSimpleConsole(options =>
+                {
+                    options.TimestampFormat = configuration["Logging:Console:TimestampFormat"] ?? "HH:mm:ss ";
+                });
+            });
+
+            return services;
+        }
+
+        private static IServiceCollection AddEventBusServices(this IServiceCollection services)
+        {
+            services.AddSingleton<IEventBus, InMemoryEventBus>();
+            return services;
+        }
+
+        private static IServiceCollection AddMarketDataServices(this IServiceCollection services)
+        {
+            services.AddSingleton<IMarketDataProvider, SimulatedMarketDataProvider>();
+            return services;
+        }
+
+        private static IServiceCollection AddStrategyServices(this IServiceCollection services, IConfiguration configuration)
+        {
+            var tradingConfig = configuration.GetSection("Trading").Get<TradingConfiguration>() ?? new TradingConfiguration();
+
+            services.AddSingleton<StrategyEngine>(sp =>
+            {
+                var engine = new StrategyEngine(tradingConfig.InitialCapital);
+
+                // Register momentum strategy
+                var momentumStrategy = new MomentumStrategy();
+                momentumStrategy.UpdateParameters(new MomentumStrategyParameters
+                {
+                    LookbackPeriod = tradingConfig.Strategy.Momentum.LookbackPeriod,
+                    MomentumThreshold = tradingConfig.Strategy.Momentum.MomentumThreshold,
+                    TakeProfitPercent = tradingConfig.Strategy.Momentum.TakeProfitPercent,
+                    StopLossPercent = tradingConfig.Strategy.Momentum.StopLossPercent,
+                    PositionSizePercent = tradingConfig.Strategy.Momentum.PositionSizePercent,
+                    MinConfidence = tradingConfig.Strategy.Momentum.MinConfidence
+                });
+
+                // Use Task.Run to avoid deadlock risk
+                Task.Run(async () => await engine.RegisterStrategyAsync(momentumStrategy)).Wait();
+
+                return engine;
+            });
+
+            services.AddTransient<IStrategy, MomentumStrategy>();
+            return services;
+        }
+
+        private static IServiceCollection AddExecutionServices(this IServiceCollection services)
+        {
+            services.AddSingleton<IOrderManager, OrderManager>();
+            services.AddSingleton<OrderManager>(sp => (OrderManager)sp.GetRequiredService<IOrderManager>());
+            return services;
+        }
+
+        private static IServiceCollection AddRiskServices(this IServiceCollection services, IConfiguration configuration)
+        {
+            var tradingConfig = configuration.GetSection("Trading").Get<TradingConfiguration>() ?? new TradingConfiguration();
+
+            services.AddSingleton<IRiskManager>(sp =>
+                new RiskManager(tradingConfig.InitialCapital));
+
+            services.AddSingleton<PnLTracker>(sp =>
+                new PnLTracker(tradingConfig.InitialCapital));
+
+            return services;
+        }
+
+        private static IServiceCollection AddTradingPipeline(this IServiceCollection services, IConfiguration configuration)
+        {
+            var tradingConfig = configuration.GetSection("Trading").Get<TradingConfiguration>() ?? new TradingConfiguration();
+
+            // Add MockExchange
+            services.AddSingleton<MockExchange>(sp =>
+            {
+                var orderManager = sp.GetRequiredService<OrderManager>();
+                return new MockExchange(orderManager)
+                {
+                    SimulatedLatencyMs = tradingConfig.MockExchange.SimulatedLatencyMs,
+                    SlippagePercent = tradingConfig.MockExchange.SlippagePercent,
+                    PartialFillProbability = (decimal)tradingConfig.MockExchange.PartialFillProbability,
+                    RejectProbability = (decimal)tradingConfig.MockExchange.RejectProbability
+                };
+            });
+
+            services.AddSingleton<TradingPipeline>(sp =>
+            {
+                var logger = sp.GetService<ILogger<TradingPipeline>>();
+                return new TradingPipeline(
+                    sp.GetRequiredService<IMarketDataProvider>(),
+                    sp.GetRequiredService<StrategyEngine>(),
+                    sp.GetRequiredService<IOrderManager>(),
+                    sp.GetRequiredService<MockExchange>(),
+                    sp.GetRequiredService<IRiskManager>(),
+                    sp.GetRequiredService<PnLTracker>(),
+                    sp.GetRequiredService<IEventBus>(),
+                    logger
+                )
+                {
+                    InitialCapital = tradingConfig.InitialCapital,
+                    TickHistorySize = tradingConfig.TickHistorySize
+                };
+            });
+
+            return services;
+        }
+    }
+}

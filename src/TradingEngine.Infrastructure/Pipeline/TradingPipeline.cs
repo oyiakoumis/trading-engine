@@ -123,7 +123,7 @@ namespace TradingEngine.Infrastructure.Pipeline
             _exchange.Start();
 
             _isRunning = true;
-            
+
             // Release semaphore for all waiting threads (5 processing threads)
             for (int i = 0; i < 5; i++)
             {
@@ -229,7 +229,7 @@ namespace TradingEngine.Infrastructure.Pipeline
             await _startupSemaphore.WaitAsync(cancellationToken);
 
             _logger?.LogInformation("Strategy processing thread started");
-            
+
             // Subscribe to strategy engine signal events
             _strategyEngine.SignalGenerated += (sender, signal) =>
             {
@@ -242,7 +242,7 @@ namespace TradingEngine.Infrastructure.Pipeline
                 {
                     // Get pending signals from strategy engine
                     var signals = _strategyEngine.GetPendingSignals();
-                    
+
                     foreach (var signal in signals)
                     {
                         // Submit signal to order router

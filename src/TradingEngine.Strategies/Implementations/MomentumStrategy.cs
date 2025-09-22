@@ -59,7 +59,7 @@ namespace TradingEngine.Strategies.Implementations
 
             // Calculate momentum
             var momentum = snapshot.CalculateMomentum(_parameters.LookbackPeriod);
-            
+
             if (!momentum.HasValue)
                 return null;
 
