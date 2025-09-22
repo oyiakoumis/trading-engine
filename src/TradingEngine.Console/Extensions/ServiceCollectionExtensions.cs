@@ -110,12 +110,13 @@ namespace TradingEngine.Console.Extensions
             services.AddSingleton<OrderManager>(sp => (OrderManager)sp.GetRequiredService<IOrderManager>());
 
             // Add OrderRouter
-            services.AddSingleton<OrderRouter>(sp =>
+            services.AddSingleton<IOrderRouter, OrderRouter>(sp =>
             {
                 var orderManager = sp.GetRequiredService<IOrderManager>();
-                var exchange = sp.GetRequiredService<MockExchange>();
+                var exchange = sp.GetRequiredService<IExchange>();
                 return new OrderRouter(orderManager, exchange);
             });
+            services.AddSingleton<OrderRouter>(sp => (OrderRouter)sp.GetRequiredService<IOrderRouter>());
 
             return services;
         }
@@ -161,7 +162,7 @@ namespace TradingEngine.Console.Extensions
                     sp.GetRequiredService<MarketDataProcessor>(),
                     sp.GetRequiredService<StrategyEngine>(),
                     sp.GetRequiredService<IOrderManager>(),
-                    sp.GetRequiredService<OrderRouter>(),
+                    (OrderRouter)sp.GetRequiredService<IOrderRouter>(),
                     sp.GetRequiredService<IExchange>(),
                     sp.GetRequiredService<IRiskManager>(),
                     sp.GetRequiredService<PnLTracker>(),

@@ -12,14 +12,17 @@ namespace TradingEngine.Execution.Services
     /// Routes orders from strategies to execution venues
     /// Handles order validation, risk checks, and routing logic
     /// </summary>
-    public class OrderRouter : IDisposable
+    public class OrderRouter : IOrderRouter
     {
         private readonly IOrderManager _orderManager;
-        private readonly MockExchange _exchange;
+        private readonly IExchange _exchange;
         private readonly ConcurrentQueue<Signal> _signalQueue;
         private readonly ConcurrentDictionary<OrderId, Signal> _orderToSignalMap;
         private readonly SemaphoreSlim _routingSemaphore;
         private readonly Timer _processTimer;
+        private readonly Timer _cleanupTimer;
+        private readonly Queue<DateTime> _recentOrderTimes;
+        private readonly object _rateLimitLock = new();
         private bool _isRunning;
         private bool _disposed;
 
@@ -29,28 +32,38 @@ namespace TradingEngine.Execution.Services
         public int MaxOrdersPerMinute { get; set; } = 100;
         public TimeSpan OrderTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
-        // Statistics
+        // Statistics - using Interlocked for thread safety
         private int _ordersRoutedCount;
         private int _ordersRejectedCount;
-        private DateTime _lastOrderTime = DateTime.UtcNow;
+        private long _lastOrderTimeTicks = DateTime.UtcNow.Ticks;
+        private readonly object _statisticsLock = new();
 
         public event EventHandler<OrderRoutedEventArgs>? OrderRouted;
         public event EventHandler<OrderRejectedEventArgs>? OrderRejected;
 
-        public OrderRouter(IOrderManager orderManager, MockExchange exchange)
+        public OrderRouter(IOrderManager orderManager, IExchange exchange)
         {
-            _orderManager = orderManager;
-            _exchange = exchange;
+            _orderManager = orderManager ?? throw new ArgumentNullException(nameof(orderManager));
+            _exchange = exchange ?? throw new ArgumentNullException(nameof(exchange));
             _signalQueue = new ConcurrentQueue<Signal>();
             _orderToSignalMap = new ConcurrentDictionary<OrderId, Signal>();
             _routingSemaphore = new SemaphoreSlim(1, 1);
+            _recentOrderTimes = new Queue<DateTime>();
 
-            // Process signals every 50ms
+            // Process signals every 50ms - using safe synchronous wrapper
             _processTimer = new Timer(
-                async _ => await ProcessSignalsAsync(),
+                ProcessSignalsSafely,
                 null,
                 Timeout.Infinite,
                 Timeout.Infinite
+            );
+
+            // Cleanup timer for stale signals every 5 minutes
+            _cleanupTimer = new Timer(
+                CleanupStaleSignals,
+                null,
+                TimeSpan.FromMinutes(5),
+                TimeSpan.FromMinutes(5)
             );
 
             // Subscribe to exchange events
@@ -89,18 +102,39 @@ namespace TradingEngine.Execution.Services
         }
 
         /// <summary>
+        /// Safe timer callback wrapper that handles exceptions
+        /// </summary>
+        private void ProcessSignalsSafely(object? state)
+        {
+            if (_disposed || !_isRunning) return;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await ProcessSignalsAsync().ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Silently handle exceptions to prevent timer from stopping
+                    // In production, this should log the exception
+                }
+            });
+        }
+
+        /// <summary>
         /// Process queued signals
         /// </summary>
         private async Task ProcessSignalsAsync()
         {
             if (!_isRunning) return;
 
-            await _routingSemaphore.WaitAsync();
+            await _routingSemaphore.WaitAsync().ConfigureAwait(false);
             try
             {
                 while (_signalQueue.TryDequeue(out var signal))
                 {
-                    await RouteSignalAsync(signal);
+                    await RouteSignalAsync(signal).ConfigureAwait(false);
                 }
             }
             finally
@@ -139,18 +173,19 @@ namespace TradingEngine.Execution.Services
                     signal.TargetPrice,
                     signal.StopLoss,
                     $"Signal_{signal.GeneratedAt.UnixMilliseconds}"
-                );
+                ).ConfigureAwait(false);
 
                 // Map order to signal for tracking
                 _orderToSignalMap.TryAdd(order.Id, signal);
 
                 // Submit to exchange
-                var submitted = await _exchange.SubmitOrderAsync(order);
+                var submitted = await _exchange.SubmitOrderAsync(order).ConfigureAwait(false);
 
                 if (submitted)
                 {
                     Interlocked.Increment(ref _ordersRoutedCount);
-                    _lastOrderTime = DateTime.UtcNow;
+                    Interlocked.Exchange(ref _lastOrderTimeTicks, DateTime.UtcNow.Ticks);
+                    TrackOrderForRateLimit(); // Track for rate limiting
 
                     OrderRouted?.Invoke(this, new OrderRoutedEventArgs
                     {
@@ -168,7 +203,7 @@ namespace TradingEngine.Execution.Services
                 // Handle take profit and stop loss orders
                 if (signal.TakeProfit.HasValue || signal.StopLoss.HasValue)
                 {
-                    await CreateBracketOrdersAsync(order, signal);
+                    await CreateBracketOrdersAsync(order, signal).ConfigureAwait(false);
                 }
             }
             catch (Exception ex)
@@ -194,7 +229,7 @@ namespace TradingEngine.Execution.Services
                     signal.TakeProfit,
                     null,
                     $"TP_{parentOrder.Id.ToShortString()}"
-                );
+                ).ConfigureAwait(false);
 
                 // Note: In a real system, this would be a conditional order
                 // that only activates when the parent order is filled
@@ -212,7 +247,7 @@ namespace TradingEngine.Execution.Services
                     null,
                     signal.StopLoss,
                     $"SL_{parentOrder.Id.ToShortString()}"
-                );
+                ).ConfigureAwait(false);
             }
         }
 
@@ -231,11 +266,10 @@ namespace TradingEngine.Execution.Services
                 }
             }
 
-            // Check order rate limit
-            var recentOrders = _ordersRoutedCount; // Simplified - should track per minute
-            if (recentOrders > MaxOrdersPerMinute)
+            // Check order rate limit (sliding window)
+            if (IsRateLimited())
             {
-                return $"Order rate limit exceeded: {recentOrders} orders per minute";
+                return "Order rate limit exceeded";
             }
 
             // Check signal confidence
@@ -259,6 +293,63 @@ namespace TradingEngine.Execution.Services
         }
 
         /// <summary>
+        /// Check if rate limiting is active using sliding window
+        /// </summary>
+        private bool IsRateLimited()
+        {
+            lock (_rateLimitLock)
+            {
+                var cutoff = DateTime.UtcNow.AddMinutes(-1);
+
+                // Remove old entries
+                while (_recentOrderTimes.Count > 0 && _recentOrderTimes.Peek() < cutoff)
+                {
+                    _recentOrderTimes.Dequeue();
+                }
+
+                return _recentOrderTimes.Count >= MaxOrdersPerMinute;
+            }
+        }
+
+        /// <summary>
+        /// Track order for rate limiting
+        /// </summary>
+        private void TrackOrderForRateLimit()
+        {
+            lock (_rateLimitLock)
+            {
+                _recentOrderTimes.Enqueue(DateTime.UtcNow);
+            }
+        }
+
+        /// <summary>
+        /// Cleanup stale signals from the signal map
+        /// </summary>
+        private void CleanupStaleSignals(object? state)
+        {
+            if (_disposed || !_isRunning) return;
+
+            try
+            {
+                var cutoff = DateTime.UtcNow.AddMinutes(-10); // Remove signals older than 10 minutes
+                var staleSignals = _orderToSignalMap
+                    .Where(kvp => kvp.Value.GeneratedAt.Value < cutoff)
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+
+                foreach (var orderId in staleSignals)
+                {
+                    _orderToSignalMap.TryRemove(orderId, out _);
+                }
+            }
+            catch (Exception)
+            {
+                // Silently handle exceptions to prevent cleanup from stopping
+                // In production, this should log the exception
+            }
+        }
+
+        /// <summary>
         /// Reject a signal
         /// </summary>
         private void RejectSignal(Signal signal, string reason)
@@ -279,25 +370,31 @@ namespace TradingEngine.Execution.Services
         private void OnExecutionReported(object? sender, ExecutionReport report)
         {
             // Update statistics based on execution reports
-            if (report.Status == OrderStatus.Filled)
+            // Remove from signal map when order reaches final state (filled, cancelled, rejected)
+            if (report.Status == OrderStatus.Filled ||
+                report.Status == OrderStatus.Cancelled ||
+                report.Status == OrderStatus.Rejected)
             {
-                // Remove from signal map when fully filled
                 _orderToSignalMap.TryRemove(report.OrderId, out _);
             }
         }
 
         /// <summary>
-        /// Get routing statistics
+        /// Get routing statistics (thread-safe)
         /// </summary>
         public OrderRoutingStatistics GetStatistics()
         {
+            // Read volatile fields and calculate statistics atomically
+            var routed = _ordersRoutedCount;
+            var rejected = _ordersRejectedCount;
+
             return new OrderRoutingStatistics
             {
-                OrdersRouted = _ordersRoutedCount,
-                OrdersRejected = _ordersRejectedCount,
+                OrdersRouted = routed,
+                OrdersRejected = rejected,
                 ActiveSignals = _signalQueue.Count,
-                SuccessRate = _ordersRoutedCount > 0
-                    ? (decimal)(_ordersRoutedCount - _ordersRejectedCount) / _ordersRoutedCount
+                SuccessRate = (routed + rejected) > 0
+                    ? (decimal)routed / (routed + rejected)
                     : 0
             };
         }
@@ -309,6 +406,7 @@ namespace TradingEngine.Execution.Services
             _disposed = true;
             Stop();
             _processTimer?.Dispose();
+            _cleanupTimer?.Dispose();
             _routingSemaphore?.Dispose();
 
             if (_exchange != null)

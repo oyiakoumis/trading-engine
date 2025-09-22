@@ -13,7 +13,7 @@ namespace TradingEngine.Execution.Services
     public class OrderManager : IOrderManager, IDisposable
     {
         private readonly ConcurrentDictionary<OrderId, Order> _orders;
-        private readonly ConcurrentDictionary<Symbol, List<Order>> _ordersBySymbol;
+        private readonly ConcurrentDictionary<Symbol, ConcurrentBag<Order>> _ordersBySymbol;
         private readonly ConcurrentQueue<Order> _orderHistory;
         private readonly SemaphoreSlim _orderSemaphore;
         private readonly Timer _cleanupTimer;
@@ -26,7 +26,7 @@ namespace TradingEngine.Execution.Services
         public OrderManager()
         {
             _orders = new ConcurrentDictionary<OrderId, Order>();
-            _ordersBySymbol = new ConcurrentDictionary<Symbol, List<Order>>();
+            _ordersBySymbol = new ConcurrentDictionary<Symbol, ConcurrentBag<Order>>();
             _orderHistory = new ConcurrentQueue<Order>();
             _orderSemaphore = new SemaphoreSlim(1, 1);
             _statistics = new OrderStatistics();
@@ -50,7 +50,7 @@ namespace TradingEngine.Execution.Services
             string? clientId = null,
             CancellationToken cancellationToken = default)
         {
-            await _orderSemaphore.WaitAsync(cancellationToken);
+            await _orderSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 // Create new order
@@ -64,11 +64,11 @@ namespace TradingEngine.Execution.Services
 
                 _ordersBySymbol.AddOrUpdate(
                     symbol,
-                    new List<Order> { order },
-                    (_, list) =>
+                    new ConcurrentBag<Order> { order },
+                    (_, bag) =>
                     {
-                        list.Add(order);
-                        return list;
+                        bag.Add(order);
+                        return bag;
                     }
                 );
 
@@ -109,7 +109,7 @@ namespace TradingEngine.Execution.Services
 
                 RaiseOrderStatusChanged(order, oldStatus, order.Status, reason);
 
-                await Task.CompletedTask;
+                await Task.CompletedTask.ConfigureAwait(false);
                 return true;
             }
             catch
@@ -131,7 +131,7 @@ namespace TradingEngine.Execution.Services
             try
             {
                 order.Modify(newQuantity, newLimitPrice, newStopPrice);
-                await Task.CompletedTask;
+                await Task.CompletedTask.ConfigureAwait(false);
                 return true;
             }
             catch
@@ -142,13 +142,13 @@ namespace TradingEngine.Execution.Services
 
         public async Task<Order?> GetOrderAsync(OrderId orderId, CancellationToken cancellationToken = default)
         {
-            await Task.CompletedTask;
+            await Task.CompletedTask.ConfigureAwait(false);
             return _orders.TryGetValue(orderId, out var order) ? order : null;
         }
 
         public async Task<IEnumerable<Order>> GetActiveOrdersAsync(Symbol? symbol = null, CancellationToken cancellationToken = default)
         {
-            await Task.CompletedTask;
+            await Task.CompletedTask.ConfigureAwait(false);
 
             IEnumerable<Order> orders = _orders.Values.Where(o => o.IsActive);
 
@@ -162,7 +162,7 @@ namespace TradingEngine.Execution.Services
 
         public async Task<IEnumerable<Order>> GetOrderHistoryAsync(Symbol? symbol = null, int limit = 100, CancellationToken cancellationToken = default)
         {
-            await Task.CompletedTask;
+            await Task.CompletedTask.ConfigureAwait(false);
 
             var history = _orderHistory.ToArray();
 
@@ -193,7 +193,7 @@ namespace TradingEngine.Execution.Services
         /// <summary>
         /// Process order submission to exchange
         /// </summary>
-        public void SubmitOrder(OrderId orderId)
+        internal void SubmitOrder(OrderId orderId)
         {
             if (_orders.TryGetValue(orderId, out var order))
             {
@@ -206,7 +206,7 @@ namespace TradingEngine.Execution.Services
         /// <summary>
         /// Process order acceptance by exchange
         /// </summary>
-        public void AcceptOrder(OrderId orderId)
+        internal void AcceptOrder(OrderId orderId)
         {
             if (_orders.TryGetValue(orderId, out var order))
             {
@@ -219,7 +219,7 @@ namespace TradingEngine.Execution.Services
         /// <summary>
         /// Process order rejection
         /// </summary>
-        public void RejectOrder(OrderId orderId, string reason)
+        internal void RejectOrder(OrderId orderId, string reason)
         {
             if (_orders.TryGetValue(orderId, out var order))
             {
@@ -240,7 +240,7 @@ namespace TradingEngine.Execution.Services
         /// <summary>
         /// Process order fill
         /// </summary>
-        public void FillOrder(OrderId orderId, Quantity fillQuantity, Price fillPrice, decimal commission = 0)
+        internal void FillOrder(OrderId orderId, Quantity fillQuantity, Price fillPrice, decimal commission = 0)
         {
             if (_orders.TryGetValue(orderId, out var order))
             {
@@ -298,16 +298,42 @@ namespace TradingEngine.Execution.Services
                     _orders.TryRemove(orderId, out _);
                 }
 
-                // Clean up symbol index
-                foreach (var kvp in _ordersBySymbol)
+                // Clean up symbol index - rebuild bags to remove completed orders
+                var symbolsToCleanup = _ordersBySymbol.Keys.ToList();
+                foreach (var symbol in symbolsToCleanup)
                 {
-                    kvp.Value.RemoveAll(o => o.IsComplete && o.UpdatedAt?.Value < cutoffTime);
+                    if (_ordersBySymbol.TryGetValue(symbol, out var oldBag))
+                    {
+                        var activeOrders = oldBag.Where(o => !o.IsComplete || o.UpdatedAt?.Value >= cutoffTime);
+                        if (activeOrders.Any())
+                        {
+                            var newBag = new ConcurrentBag<Order>();
+                            foreach (var activeOrder in activeOrders)
+                            {
+                                newBag.Add(activeOrder);
+                            }
+                            _ordersBySymbol.TryUpdate(symbol, newBag, oldBag);
+                        }
+                        else
+                        {
+                            _ordersBySymbol.TryRemove(symbol, out _);
+                        }
+                    }
                 }
             }
             catch (Exception ex)
             {
-                // Log error in production
-                Console.WriteLine($"Error cleaning up old orders: {ex.Message}");
+                // Proper exception handling - don't let cleanup failures break the service
+                // In production, this should use proper logging framework
+                try
+                {
+                    Console.WriteLine($"Error cleaning up old orders: {ex.Message}");
+                    // Could also log to file or send to monitoring system
+                }
+                catch
+                {
+                    // Even logging failed - silently continue to keep service running
+                }
             }
         }
 
