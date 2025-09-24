@@ -11,6 +11,8 @@
     <ProjectReference Include="..\TradingEngine.Domain\TradingEngine.Domain.csproj" />
     <ProjectReference Include="..\TradingEngine.MarketData\TradingEngine.MarketData.csproj" />
     <ProjectReference Include="..\TradingEngine.Strategies\TradingEngine.Strategies.csproj" />
+    <ProjectReference Include="..\TradingEngine.Risk\TradingEngine.Risk.csproj" />
+    <ProjectReference Include="..\TradingEngine.Infrastructure\TradingEngine.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>

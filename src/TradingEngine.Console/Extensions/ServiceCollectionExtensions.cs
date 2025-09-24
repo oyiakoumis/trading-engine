@@ -106,10 +106,55 @@ namespace TradingEngine.Console.Extensions
 
         private static IServiceCollection AddExecutionServices(this IServiceCollection services)
         {
+            // Register core order processor
+            services.AddSingleton<TradingEngine.Execution.Services.OrderProcessor>();
+            
+            // Register adapters for existing services
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.IRiskAssessment>(sp =>
+                new TradingEngine.Execution.Adapters.RiskManagerAdapter(sp.GetRequiredService<IRiskManager>()));
+            
+            // Register supporting services
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.ISignalToOrderConverter,
+                TradingEngine.Execution.Pipeline.Stages.SignalToOrderConverter>();
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.IRateLimiter>(sp =>
+                new TradingEngine.Execution.Adapters.SimpleRateLimiter(100)); // 100 orders per minute
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.IBulkheadIsolation>(sp =>
+                new TradingEngine.Execution.Adapters.SimpleBulkheadIsolation(10)); // 10 concurrent operations
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.IMetricsCollector,
+                TradingEngine.Execution.Adapters.InMemoryMetricsCollector>();
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.IEventBus>(sp =>
+                new TradingEngine.Execution.Adapters.SimpleEventBusAdapter(sp.GetRequiredService<TradingEngine.Infrastructure.EventBus.IEventBus>()));
+            
+            // Register the new order processing pipeline system
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Interfaces.IOrderProcessingPipeline,
+                TradingEngine.Execution.Pipeline.OrderProcessingPipeline>();
+            
+            // Register processing stages
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.ValidationStage>();
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.RiskAssessmentStage>();
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.CreationStage>();
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.ExecutionStage>();
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.PostProcessingStage>();
+            
+            // Register resilience components
+            services.AddSingleton<TradingEngine.Execution.Resilience.ICircuitBreaker>(sp =>
+                TradingEngine.Execution.Resilience.CircuitBreakerFactory.CreateForExchange(
+                    sp.GetService<ILogger<TradingEngine.Execution.Resilience.CircuitBreaker>>()));
+            
+            // Register command handlers and supporting services
+            services.AddSingleton<TradingEngine.Execution.Commands.IOrderCommandHandler>(sp =>
+                sp.GetRequiredService<TradingEngine.Execution.Services.OrderProcessor>());
+            services.AddSingleton<TradingEngine.Execution.Pipeline.Stages.IOrderTracker>(sp =>
+                sp.GetRequiredService<TradingEngine.Execution.Services.OrderProcessor>());
+            
+            // Register the order processing coordinator
+            services.AddSingleton<TradingEngine.Execution.Pipeline.OrderProcessingCoordinator>();
+            
+            // Keep the old services for backward compatibility
             services.AddSingleton<IOrderManager, OrderManager>();
             services.AddSingleton<OrderManager>(sp => (OrderManager)sp.GetRequiredService<IOrderManager>());
 
-            // Add OrderRouter
+            // Add OrderRouter (kept for compatibility)
             services.AddSingleton<IOrderRouter, OrderRouter>(sp =>
             {
                 var orderManager = sp.GetRequiredService<IOrderManager>();
@@ -161,8 +206,7 @@ namespace TradingEngine.Console.Extensions
                     sp.GetRequiredService<IMarketDataProvider>(),
                     sp.GetRequiredService<MarketDataProcessor>(),
                     sp.GetRequiredService<StrategyEngine>(),
-                    sp.GetRequiredService<IOrderManager>(),
-                    (OrderRouter)sp.GetRequiredService<IOrderRouter>(),
+                    sp.GetRequiredService<TradingEngine.Execution.Pipeline.OrderProcessingCoordinator>(),
                     sp.GetRequiredService<IExchange>(),
                     sp.GetRequiredService<IRiskManager>(),
                     sp.GetRequiredService<PnLTracker>(),

@@ -4,7 +4,7 @@ using TradingEngine.Domain.Entities;
 using TradingEngine.Domain.Events;
 using TradingEngine.Domain.ValueObjects;
 using TradingEngine.Execution.Interfaces;
-using TradingEngine.Execution.Services;
+using TradingEngine.Execution.Pipeline;
 using TradingEngine.Infrastructure.EventBus;
 using TradingEngine.MarketData.Interfaces;
 using TradingEngine.MarketData.Processors;
@@ -16,8 +16,9 @@ using TradingEngine.Strategies.Models;
 namespace TradingEngine.Infrastructure.Pipeline
 {
     /// <summary>
-    /// Trading pipeline that orchestrates all components
-    /// Uses dependency injection and reactive patterns
+    /// Modern trading pipeline with redesigned order processing architecture
+    /// Uses the new OrderProcessingCoordinator for high-performance signal-to-order processing
+    /// Implements event-driven architecture with CQRS patterns
     /// </summary>
     public class TradingPipeline : IPipelineOrchestrator, IAsyncDisposable
     {
@@ -25,8 +26,7 @@ namespace TradingEngine.Infrastructure.Pipeline
         private readonly IMarketDataProvider _marketDataProvider;
         private readonly MarketDataProcessor _marketDataProcessor;
         private readonly StrategyEngine _strategyEngine;
-        private readonly IOrderManager _orderManager;
-        private readonly OrderRouter _orderRouter;
+        private readonly OrderProcessingCoordinator _orderProcessingCoordinator;
         private readonly IExchange _exchange;
         private readonly IRiskManager _riskManager;
         private readonly PnLTracker _pnlTracker;
@@ -60,8 +60,7 @@ namespace TradingEngine.Infrastructure.Pipeline
             IMarketDataProvider marketDataProvider,
             MarketDataProcessor marketDataProcessor,
             StrategyEngine strategyEngine,
-            IOrderManager orderManager,
-            OrderRouter orderRouter,
+            OrderProcessingCoordinator orderProcessingCoordinator,
             IExchange exchange,
             IRiskManager riskManager,
             PnLTracker pnlTracker,
@@ -71,8 +70,7 @@ namespace TradingEngine.Infrastructure.Pipeline
             _marketDataProvider = marketDataProvider ?? throw new ArgumentNullException(nameof(marketDataProvider));
             _marketDataProcessor = marketDataProcessor ?? throw new ArgumentNullException(nameof(marketDataProcessor));
             _strategyEngine = strategyEngine ?? throw new ArgumentNullException(nameof(strategyEngine));
-            _orderManager = orderManager ?? throw new ArgumentNullException(nameof(orderManager));
-            _orderRouter = orderRouter ?? throw new ArgumentNullException(nameof(orderRouter));
+            _orderProcessingCoordinator = orderProcessingCoordinator ?? throw new ArgumentNullException(nameof(orderProcessingCoordinator));
             _exchange = exchange ?? throw new ArgumentNullException(nameof(exchange));
             _riskManager = riskManager ?? throw new ArgumentNullException(nameof(riskManager));
             _pnlTracker = pnlTracker ?? throw new ArgumentNullException(nameof(pnlTracker));
@@ -97,7 +95,7 @@ namespace TradingEngine.Infrastructure.Pipeline
         }
 
         /// <summary>
-        /// Start the trading pipeline
+        /// Start the trading pipeline with modern order processing
         /// </summary>
         public async Task StartAsync(IEnumerable<Symbol> symbols)
         {
@@ -109,18 +107,21 @@ namespace TradingEngine.Infrastructure.Pipeline
 
             try
             {
-                _logger?.LogInformation("Starting trading pipeline with capital {Capital:C}", InitialCapital);
+                _logger?.LogInformation("Starting modern trading pipeline with capital {Capital:C}", InitialCapital);
 
                 // Start statistics collection
                 _statisticsCollector.Start();
 
-                // Start all components in order
+                // Start components in dependency order
                 await _marketDataProvider.ConnectAsync();
                 await _marketDataProvider.SubscribeAsync(symbols);
 
                 _marketDataProcessor.Start();
                 _strategyEngine.Start();
-                _orderRouter.Start();
+                
+                // Start the new order processing coordinator
+                await _orderProcessingCoordinator.StartAsync(_shutdownCts.Token);
+                
                 _exchange.Start();
 
                 _isRunning = true;
@@ -131,21 +132,23 @@ namespace TradingEngine.Infrastructure.Pipeline
                     _startupSemaphore.Release();
                 }
 
-                await _eventBus.PublishAsync(new SystemEvent("INFO", "Trading pipeline started", "Pipeline"));
-                RaisePipelineEvent("Pipeline Started", PipelineEventType.Started);
+                await _eventBus.PublishAsync(new SystemEvent("INFO", "Modern trading pipeline started", "PipelineV2"));
+                RaisePipelineEvent("Modern Pipeline Started", PipelineEventType.Started);
 
-                _logger?.LogInformation("Trading pipeline started successfully");
+                _logger?.LogInformation(
+                    "Modern trading pipeline started successfully with {Symbols} symbols",
+                    string.Join(", ", symbols.Select(s => s.Value)));
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "Failed to start trading pipeline");
+                _logger?.LogError(ex, "Failed to start modern trading pipeline");
                 await StopAsync(); // Cleanup on failure
                 throw;
             }
         }
 
         /// <summary>
-        /// Stop the trading pipeline
+        /// Stop the trading pipeline gracefully
         /// </summary>
         public async Task StopAsync()
         {
@@ -157,14 +160,17 @@ namespace TradingEngine.Infrastructure.Pipeline
 
             try
             {
-                _logger?.LogInformation("Stopping trading pipeline");
+                _logger?.LogInformation("Stopping modern trading pipeline");
 
                 _isRunning = false;
                 _statisticsCollector.Stop();
 
-                // Stop components in reverse order
+                // Stop components in reverse dependency order
                 _strategyEngine.Stop();
-                _orderRouter.Stop();
+                
+                // Stop the order processing coordinator
+                await _orderProcessingCoordinator.StopAsync(_shutdownCts.Token);
+                
                 _exchange.Stop();
                 await _marketDataProcessor.StopAsync();
                 await _marketDataProvider.DisconnectAsync();
@@ -187,20 +193,20 @@ namespace TradingEngine.Infrastructure.Pipeline
                     _logger?.LogWarning("Market data task did not stop within timeout");
                 }
 
-                await _eventBus.PublishAsync(new SystemEvent("INFO", "Trading pipeline stopped", "Pipeline"));
-                RaisePipelineEvent("Pipeline Stopped", PipelineEventType.Stopped);
+                await _eventBus.PublishAsync(new SystemEvent("INFO", "Modern trading pipeline stopped", "PipelineV2"));
+                RaisePipelineEvent("Modern Pipeline Stopped", PipelineEventType.Stopped);
 
-                _logger?.LogInformation("Trading pipeline stopped successfully");
+                _logger?.LogInformation("Modern trading pipeline stopped successfully");
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "Error stopping trading pipeline");
+                _logger?.LogError(ex, "Error stopping modern trading pipeline");
                 throw;
             }
         }
 
         /// <summary>
-        /// Process market data in dedicated task with proper error handling
+        /// Process market data with enhanced error handling and performance monitoring
         /// </summary>
         private async Task ProcessMarketDataAsync(CancellationToken cancellationToken)
         {
@@ -213,6 +219,8 @@ namespace TradingEngine.Infrastructure.Pipeline
                 {
                     try
                     {
+                        var processingStart = DateTime.UtcNow;
+
                         // Process tick through the processor
                         await _marketDataProcessor.SubmitTickAsync(tick, cancellationToken);
 
@@ -220,20 +228,30 @@ namespace TradingEngine.Infrastructure.Pipeline
                         var tickHistory = _marketDataProcessor.GetTickHistory(tick.Symbol).ToList();
                         await _strategyEngine.UpdateMarketDataAsync(tick, tickHistory);
 
-                        // Update exchange prices
+                        // Update exchange prices for execution
                         _exchange.UpdateMarketPrice(tick.Symbol, tick.Bid, tick.Ask);
 
                         // Update P&L tracker
                         await _pnlTracker.UpdateMarketPriceAsync(tick.Symbol, tick.MidPrice);
 
-                        // Publish event
+                        // Publish tick received event
                         await _eventBus.PublishAsync(new TickReceivedEvent(tick), cancellationToken);
 
                         _statisticsCollector.IncrementTicksProcessed();
+
+                        // Log performance metrics periodically
+                        var processingTime = DateTime.UtcNow - processingStart;
+                        if (processingTime.TotalMilliseconds > 10) // Log slow ticks
+                        {
+                            _logger?.LogDebug(
+                                "Tick processing for {Symbol} took {ProcessingTime}ms",
+                                tick.Symbol,
+                                processingTime.TotalMilliseconds);
+                        }
                     }
                     catch (Exception ex)
                     {
-                        _logger?.LogError(ex, "Error processing tick for {Symbol}", tick.Symbol);
+                        _logger?.LogError(ex, "Error processing tick for {Symbol}: {Price}", tick.Symbol, tick.MidPrice);
                     }
                 }
             }
@@ -252,27 +270,42 @@ namespace TradingEngine.Infrastructure.Pipeline
             }
         }
 
-
         /// <summary>
-        /// Initialize event handlers
+        /// Initialize event handlers for the modern pipeline
         /// </summary>
         private void InitializeEventHandlers()
         {
             // Subscribe to risk breaches
             _riskManager.RiskBreached += OnRiskBreached;
 
-            // CRITICAL FIX: Connect signal flow to order routing
+            // Connect signal flow to new order processing coordinator
             _strategyEngine.SignalGenerated += OnSignalGenerated;
+
+            // Subscribe to order processing coordinator events
+            _orderProcessingCoordinator.SignalReceived += OnSignalReceived;
+            _orderProcessingCoordinator.SignalProcessed += OnSignalProcessed;
+            _orderProcessingCoordinator.SignalRejected += OnSignalRejected;
         }
 
         /// <summary>
-        /// Handle signals generated by strategies
+        /// Handle signals generated by strategies using the new coordinator
         /// </summary>
         private void OnSignalGenerated(object? sender, Signal signal)
         {
             try
             {
-                _orderRouter.SubmitSignal(signal);
+                var submitted = _orderProcessingCoordinator.SubmitSignal(signal);
+                
+                if (!submitted)
+                {
+                    _logger?.LogWarning(
+                        "Failed to submit signal for {Symbol} {Side} {Quantity}",
+                        signal.Symbol,
+                        signal.Side,
+                        signal.Quantity);
+                }
+
+                _statisticsCollector.IncrementSignalsGenerated();
             }
             catch (Exception ex)
             {
@@ -281,18 +314,75 @@ namespace TradingEngine.Infrastructure.Pipeline
         }
 
         /// <summary>
-        /// Handle risk breaches synchronously
+        /// Handle signal received by coordinator
+        /// </summary>
+        private void OnSignalReceived(object? sender, SignalReceivedEventArgs e)
+        {
+            _logger?.LogDebug(
+                "Signal received for processing: {Symbol} {Side} {Quantity}",
+                e.Signal.Symbol,
+                e.Signal.Side,
+                e.Signal.Quantity);
+        }
+
+        /// <summary>
+        /// Handle successfully processed signals
+        /// </summary>
+        private void OnSignalProcessed(object? sender, SignalProcessedEventArgs e)
+        {
+            if (e.Result.IsSuccess)
+            {
+                _logger?.LogInformation(
+                    "Signal processed successfully: OrderId {OrderId} for {Symbol}",
+                    e.Result.OrderId,
+                    e.Signal.Symbol);
+
+                _statisticsCollector.IncrementOrdersExecuted();
+            }
+            else
+            {
+                _logger?.LogWarning(
+                    "Signal processing failed for {Symbol}: {ErrorMessage}",
+                    e.Signal.Symbol,
+                    e.Result.ErrorMessage);
+            }
+        }
+
+        /// <summary>
+        /// Handle rejected signals
+        /// </summary>
+        private void OnSignalRejected(object? sender, SignalRejectedEventArgs e)
+        {
+            _logger?.LogWarning(
+                "Signal rejected for {Symbol} {Side} {Quantity}: {Reason}",
+                e.Signal.Symbol,
+                e.Signal.Side,
+                e.Signal.Quantity,
+                e.Reason);
+        }
+
+        /// <summary>
+        /// Handle risk breaches with enhanced monitoring
         /// </summary>
         private void OnRiskBreached(object? sender, RiskBreachEventArgs args)
         {
             try
             {
-                _logger?.LogWarning("Risk breach detected: {Description}", args.Breach.Description);
+                _logger?.LogWarning(
+                    "Risk breach detected: {Description} (Severity: {Severity})",
+                    args.Breach.Description,
+                    args.Breach.Severity);
 
                 if (args.RequiresImmediateAction)
                 {
-                    _logger?.LogCritical("Immediate action required for risk breach");
+                    _logger?.LogCritical(
+                        "CRITICAL: Immediate action required for risk breach: {Description}",
+                        args.Breach.Description);
+                    
                     RaisePipelineEvent($"Critical Risk: {args.Breach.Description}", PipelineEventType.RiskBreach);
+                    
+                    // In a production system, this might trigger automatic position liquidation
+                    // or other emergency risk management procedures
                 }
             }
             catch (Exception ex)
@@ -302,13 +392,52 @@ namespace TradingEngine.Infrastructure.Pipeline
         }
 
         /// <summary>
-        /// Get pipeline statistics
+        /// Get comprehensive pipeline statistics including new order processing metrics
         /// </summary>
         public PipelineStatistics GetStatistics()
         {
             var activePositions = _positions.Count(p => p.Value.IsOpen);
             var eventBusStats = _eventBus.GetStatistics();
-            return _statisticsCollector.GetStatistics(activePositions, eventBusStats);
+            var coordinatorMetrics = _orderProcessingCoordinator.GetMetrics();
+            
+            var stats = _statisticsCollector.GetStatistics(activePositions, eventBusStats);
+            
+            // Enhance statistics with order processing coordinator metrics
+            return new EnhancedPipelineStatistics
+            {
+                IsRunning = stats.IsRunning,
+                Uptime = stats.Uptime,
+                TicksProcessed = stats.TicksProcessed,
+                SignalsGenerated = stats.SignalsGenerated,
+                OrdersExecuted = stats.OrdersExecuted,
+                ActivePositions = activePositions,
+                EventBusStats = stats.EventBusStats,
+                
+                // New order processing metrics
+                SignalsReceived = coordinatorMetrics.ReceivedSignals,
+                SignalsRejected = coordinatorMetrics.RejectedSignals,
+                SuccessfulProcessing = coordinatorMetrics.SuccessfulProcessing,
+                FailedProcessing = coordinatorMetrics.FailedProcessing,
+                ProcessingSuccessRate = coordinatorMetrics.SuccessRate,
+                AverageProcessingTime = coordinatorMetrics.AverageProcessingTimeMs
+            };
+        }
+
+        /// <summary>
+        /// Get detailed health information for the entire pipeline
+        /// </summary>
+        public async Task<PipelineHealthInfo> GetHealthAsync()
+        {
+            var coordinatorHealth = await _orderProcessingCoordinator.GetHealthAsync();
+            
+            return new PipelineHealthInfo
+            {
+                IsRunning = _isRunning,
+                ComponentsHealthy = !_disposed,
+                OrderProcessingHealth = coordinatorHealth,
+                Statistics = (EnhancedPipelineStatistics)GetStatistics(),
+                LastHealthCheck = DateTime.UtcNow
+            };
         }
 
         private void RaisePipelineEvent(string message, PipelineEventType eventType)
@@ -351,6 +480,13 @@ namespace TradingEngine.Infrastructure.Pipeline
                 // Unsubscribe from events
                 _riskManager.RiskBreached -= OnRiskBreached;
                 _strategyEngine.SignalGenerated -= OnSignalGenerated;
+                
+                if (_orderProcessingCoordinator != null)
+                {
+                    _orderProcessingCoordinator.SignalReceived -= OnSignalReceived;
+                    _orderProcessingCoordinator.SignalProcessed -= OnSignalProcessed;
+                    _orderProcessingCoordinator.SignalRejected -= OnSignalRejected;
+                }
 
                 _shutdownCts.Dispose();
                 _startupSemaphore.Dispose();
@@ -362,9 +498,7 @@ namespace TradingEngine.Infrastructure.Pipeline
                 if (_strategyEngine is IDisposable disposableStrategy)
                     disposableStrategy.Dispose();
 
-                if (_orderRouter is IDisposable disposableRouter)
-                    disposableRouter.Dispose();
-
+                _orderProcessingCoordinator?.Dispose();
                 _exchange?.Dispose();
                 _pnlTracker?.Dispose();
 
@@ -374,11 +508,11 @@ namespace TradingEngine.Infrastructure.Pipeline
                 if (_eventBus is IDisposable disposableEventBus)
                     disposableEventBus.Dispose();
 
-                _logger?.LogInformation("Trading pipeline disposed successfully");
+                _logger?.LogInformation("Modern trading pipeline disposed successfully");
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "Error during pipeline disposal");
+                _logger?.LogError(ex, "Error during modern pipeline disposal");
             }
         }
 
@@ -392,7 +526,42 @@ namespace TradingEngine.Infrastructure.Pipeline
     }
 
     /// <summary>
-    /// Pipeline statistics
+    /// Enhanced pipeline statistics with order processing metrics
+    /// </summary>
+    public class EnhancedPipelineStatistics : PipelineStatistics
+    {
+        public long SignalsReceived { get; set; }
+        public long SignalsRejected { get; set; }
+        public long SuccessfulProcessing { get; set; }
+        public long FailedProcessing { get; set; }
+        public decimal ProcessingSuccessRate { get; set; }
+        public double AverageProcessingTime { get; set; }
+
+        public override string ToString()
+        {
+            return base.ToString() + 
+                   $" | Signals: Received={SignalsReceived}, Rejected={SignalsRejected} | " +
+                   $"Processing: Success={SuccessfulProcessing}, Failed={FailedProcessing}, " +
+                   $"Rate={ProcessingSuccessRate:P2}, AvgTime={AverageProcessingTime:F2}ms";
+        }
+    }
+
+    /// <summary>
+    /// Comprehensive pipeline health information
+    /// </summary>
+    public sealed record PipelineHealthInfo
+    {
+        public bool IsRunning { get; init; }
+        public bool ComponentsHealthy { get; init; }
+        public CoordinatorHealthInfo OrderProcessingHealth { get; init; } = null!;
+        public EnhancedPipelineStatistics Statistics { get; init; } = null!;
+        public DateTime LastHealthCheck { get; init; }
+        
+        public bool IsHealthy => IsRunning && ComponentsHealthy && OrderProcessingHealth.PipelineHealth.IsHealthy;
+    }
+
+    /// <summary>
+    /// Pipeline statistics (base class for compatibility)
     /// </summary>
     public class PipelineStatistics
     {
@@ -434,4 +603,5 @@ namespace TradingEngine.Infrastructure.Pipeline
         Warning,
         Info
     }
+
 }
